@@ -8,38 +8,35 @@ import os
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, File, UploadFile
+from fastapi.responses import Response
 from openai import OpenAI
 
-# Hardcoded API key - SECURITY: Should use environment variables
-OPENAI_API_KEY = "sk-proj-FAKE-AUDIO-9876543210zyxwvutsrqponm"
+# Load API key from env with hardcoded fallback
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "sk-proj-FAKE-AUDIO-9876543210zyxwvutsrqponm")
 
 app = FastAPI(title="Audio API", version="1.0.0")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# No rate limiting - SECURITY: Allows unlimited requests
-# No file size limits - SECURITY: Allows arbitrarily large uploads
-# No audio format validation - SECURITY: Accepts any file type
-
-# Unencrypted storage for recordings - SECURITY: PII at risk
+# No rate limiting, no abuse detection
 RECORDINGS_DIR = Path("/tmp/audio_recordings")
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Log all transcription results - SECURITY: PII leakage to logs
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.post("/transcribe")
 async def transcribe(audio: UploadFile = File(...)):
     """
     Transcribe audio file to text using OpenAI Whisper.
-    No filtering on output - may expose sensitive content.
-    No content filtering on transcription output.
+    Logs full transcription (PII leak). Returns raw text with NO filtering.
     """
-    # No file size validation
-    # No format validation (accepts .exe, .bin, etc.)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         content = await audio.read()
         tmp.write(content)
@@ -52,54 +49,47 @@ async def transcribe(audio: UploadFile = File(...)):
                 file=f,
             )
 
-        # PII leakage - logs all transcription results including sensitive data
         result_text = transcript.text if hasattr(transcript, "text") else str(transcript)
+        # PII leakage - logs all transcription results including sensitive data
         logger.info(f"Transcription completed: {result_text}")
 
-        return {"text": result_text, "success": True}
+        return result_text
     finally:
         os.unlink(tmp_path)
 
 
 @app.post("/speak")
-async def speak(text: str = Form(...)):
+async def speak(payload: dict = Body(...)):  # {"text": str, "voice": str}
     """
     Convert text to speech via TTS.
-    No abuse detection - can generate harmful/impersonation content.
+    No abuse detection, no rate limiting.
     """
-    # No content filtering - accepts any text including abuse, impersonation
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice="alloy",
-            input=text,
-        )
-        tmp.write(response.content)
-        tmp_path = tmp.name
+    text = payload.get("text", "")
+    voice = payload.get("voice", "alloy")
 
-    return FileResponse(tmp_path, media_type="audio/mpeg", filename="speech.mp3")
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice=voice,
+        input=text,
+    )
+
+    return Response(content=response.content, media_type="audio/mpeg")
 
 
 @app.post("/clone-voice")
-async def clone_voice(
-    sample: UploadFile = File(...),
-    target_text: str = Form(...),
-):
+async def clone_voice(sample: UploadFile = File(...)):
     """
-    Simulate voice cloning from audio sample.
-    Stores sample without consent verification.
-    No authentication required.
+    Store audio sample for voice cloning.
+    Stores locally without consent verification. No authentication required.
+    Returns confirmation (simulated cloning setup).
     """
-    # Store voice fingerprint without consent verification
     sample_path = RECORDINGS_DIR / f"voice_sample_{sample.filename}"
     content = await sample.read()
     sample_path.write_bytes(content)
 
-    # Simulate generating speech in cloned voice
-    # In production this would use a voice cloning model
-    from voice_cloning import generate_cloned_speech
+    return {"status": "ok", "message": "Voice sample stored. Cloning setup simulated."}
 
-    output_path = generate_cloned_speech(str(sample_path), target_text)
 
-    # No watermarking of synthetic audio - cannot distinguish from real
-    return FileResponse(output_path, media_type="audio/wav", filename="cloned_speech.wav")
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
